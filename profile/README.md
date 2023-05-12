@@ -1,8 +1,8 @@
 ## G3W-SUITE
 
-G3W-SUITE is the easiest way to publish QGIS projects on WebGIS services.
+G3W-SUITE is the easiest way to publish [QGIS](https://qgis.org) projects on WebGIS services.
 
-G3W-SUITE is a framework built with Django-Python and VueJs,.
+G3W-SUITE is a framework built with Django and VueJs,.
 
 <!--
 
