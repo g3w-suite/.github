@@ -29,7 +29,7 @@ Publish your [QGIS](https://qgis.org) projects as WebGIS services. Built with Dj
 
 <p dir="auto">
   <a href="https://github.com/g3w-suite/g3w-client">
-    <img src="https://camo.githubusercontent.com/6dfa8e036696a85475f5c64e3c92bc6132abe869abc8522e3d8d642facbf4234/68747470733a2f2f6733772d73756974652e72656164746865646f63732e696f2f656e2f6c61746573742f5f696d616765732f673377636c69656e745f696e746572666163652e706e67" alt="g3w-client" style="max-width: 100%;">
+    <img src="https://g3w-suite.readthedocs.io/en/latest/_images/g3wclient_interface.png" alt="g3w-client" style="max-width: 100%;">
   </a>
 </p>
 
