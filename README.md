@@ -1,2 +1,1 @@
-# .github
-A public repossitory for release informationa about G3W-SUITE
+G3W-SUITE's organization profile and some other community health files
