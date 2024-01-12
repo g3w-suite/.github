@@ -15,7 +15,7 @@
 
 Publish your [QGIS](https://qgis.org) projects as WebGIS services. Built with Django and Vue.
 
-| [📖 Docs](https://g3w-suite.readthedocs.io/) | [💬 Discuss](https://github.com/g3w-suite/community/discussions) | [❤️ Sponsor](mailto:info@gis3w.it?subject=Sponsoring%20G3W-SUITE%20development) |
+| [📖 Docs](https://g3w-suite.readthedocs.io/) | [💬 Discuss](https://github.com/g3w-suite/community/discussions) | [❤️ Sponsor](mailto:info@gis3w.it?subject=Sponsoring%20G3W-SUITE%20development&body=Hi%20there,%20I'd%20like%20to%20fund%20some%20code%20changes:) |
 |--|--|--|
 
 ## G3W-ADMIN
