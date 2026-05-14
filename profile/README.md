@@ -41,3 +41,13 @@ Publish your [QGIS](https://qgis.org) projects as WebGIS services. Built with Dj
     <img src="https://github.com/g3w-suite/g3w-suite-docker/raw/dev/docs/img/docker.png" alt="Docker structure" style="max-width: 100%;">
   </a>
 </p>
+
+---
+
+## ✨ Contributing to the ecosystem
+
+See what's next on our public [roadmap](https://github.com/orgs/g3w-suite/projects/12) and [let us know](https://github.com/g3w-suite/community/discussions) if you have any suggestions:
+
+- 🤝 [**Contributing Guidelines**](CONTRIBUTING.md)
+- ⚖️ [**Code of Conduct**](CODE_OF_CONDUCT.md)
+- 📜 [**License Info**](LICENSE)
