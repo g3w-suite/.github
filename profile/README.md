@@ -20,9 +20,10 @@ Publish your [QGIS](https://qgis.org) projects as WebGIS services. Built with Dj
 
 ## G3W-ADMIN
 
+
 <p dir="auto">
   <a href="https://github.com/g3w-suite/g3w-admin">
-    <img src="https://user-images.githubusercontent.com/9614886/189155796-6feff629-b500-4e38-b7c2-d98b53ae7564.png" alt="Admin GUI" style="max-width: 100%;">
+    <img src="https://github.com/user-attachments/assets/98ae5bd2-160c-4f82-8c8a-d32979ed161e" alt="Admin GUI" style="max-width: 100%;">
   </a>
 </p>
 
