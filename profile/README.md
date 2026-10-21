@@ -9,7 +9,7 @@
 🧙 Remember, you can do mighty things with the power of [Markdown](https://docs.github.com/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)
 -->
 
-[![License](https://img.shields.io/badge/license-MPL%202-blue.svg?style=flat)](LICENSE) 
+[![License](https://img.shields.io/badge/license-MPL%202-blue.svg?style=flat)](https://github.com/g3w-suite/.github/blob/main/LICENSE) 
 
 # G3W-SUITE
 
