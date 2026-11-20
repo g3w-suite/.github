@@ -82,6 +82,9 @@ jobs:
           repository: g3w-suite/.github
           ref: main
           path: shared
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -98,14 +101,7 @@ jobs:
           import textwrap
           from pathlib import Path
 
-          content = Path('shared/.github/actions/plugin-cd/action.yml').read_text(encoding='utf-8')
-          publish = content.index('    - name: Publish to PyPI\n')
-          tag = content.index('    - name: Create release commit and tag\n')
-          release = content.index('    - name: Create GitHub release\n')
-          assert publish < tag < release
-          assert "if: ${{ steps.version.outputs.proceed == 'true' }}" in content[publish:tag]
-          assert "if: ${{ success() && steps.version.outputs.proceed == 'true' }}" in content[tag:release]
-          assert "if: ${{ success() && steps.release.outputs.proceed == 'true' }}" in content[release:]
+          content = Path('shared/.github/actions/plugin-cd-release/action.yml').read_text(encoding='utf-8')
           script = textwrap.dedent(content.split('    - name: Create GitHub release\n', 1)[1]
                                    .split('      run: |\n', 1)[1])
           with tempfile.TemporaryDirectory() as directory:
@@ -169,6 +165,21 @@ jobs:
               assert automatic[:7] not in notes
               assert '--notes-start-tag' not in (root / 'args').read_text()
           PY
+      - name: Test CD wrapper
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('plugin/.github/workflows/cd.yml')
+          if workflow.exists():
+              content = workflow.read_text(encoding='utf-8')
+              prepare = content.index('uses: g3w-suite/.github/.github/actions/plugin-cd@main')
+              publish = content.index('uses: pypa/gh-action-pypi-publish@release/v1')
+              release = content.index('uses: g3w-suite/.github/.github/actions/plugin-cd-release@main')
+              assert prepare < publish < release
+              assert "if: ${{ steps.prepare.outputs.proceed == 'true' }}" in content
+              assert "if: ${{ success() && steps.prepare.outputs.proceed == 'true' }}" in content
+          PY
       # Run the real version-selection and release-commit steps against temporary
       # bare remotes. This covers retries and stale-branch races without pushing to
       # the plugin repository.
@@ -182,8 +193,9 @@ jobs:
           import textwrap
           from pathlib import Path
 
-          content = Path('shared/.github/actions/plugin-cd/action.yml').read_text(encoding='utf-8')
-          def script(name):
+          prepare = Path('shared/.github/actions/plugin-cd/action.yml').read_text(encoding='utf-8')
+          release_action = Path('shared/.github/actions/plugin-cd-release/action.yml').read_text(encoding='utf-8')
+          def script(content, name):
               step = content.split(f'    - name: {name}\n', 1)[1].split('\n    - name:', 1)[0]
               return textwrap.dedent(step.split('      run: |\n', 1)[1])
 
@@ -217,7 +229,8 @@ jobs:
                   output.write_text('', encoding='utf-8')
                   env = {**os.environ, 'COMMIT_SHA': sha, 'BRANCH': 'dev',
                          'GH_TOKEN': 'test', 'GITHUB_OUTPUT': output_path, **values}
-                  subprocess.run([bash, '-eo', 'pipefail', '-c', script(name)],
+                  content = prepare if name == 'Select next version' else release_action
+                  subprocess.run([bash, '-eo', 'pipefail', '-c', script(content, name)],
                                  cwd=checkout, env=env, check=True)
                   return dict(line.split('=', 1) for line in output.read_text().splitlines())
 

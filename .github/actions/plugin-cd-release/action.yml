@@ -1,0 +1,113 @@
+name: Plugin CD release
+description: Create the release commit, tag, and GitHub release after PyPI publication.
+
+inputs:
+  github-token:
+    description: Token used to update the repository and create the release.
+    required: true
+  tag:
+    description: Release tag selected by the preparation action.
+    required: true
+  existing:
+    description: Whether the release tag already exists.
+    required: true
+  commit-sha:
+    description: Source commit which passed CI.
+    required: true
+  branch:
+    description: Source branch which passed CI.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Commit, tag, and branch update are pushed atomically. A lease prevents a
+    # stale CI run from creating the release commit/tag after the branch advances.
+    - name: Create release commit and tag
+      id: release
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        TAG: ${{ inputs.tag }}
+        EXISTING: ${{ inputs.existing }}
+        COMMIT_SHA: ${{ inputs.commit-sha }}
+        BRANCH: ${{ inputs.branch }}
+      shell: bash
+      run: |
+        if [ "$EXISTING" != true ]; then
+          git config user.name github-actions[bot]
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --allow-empty -m "${TAG#v}"
+          git tag -a "$TAG" HEAD -m "Automated release for $COMMIT_SHA"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          if ! git -c http.extraheader="$auth" push --atomic \
+            --force-with-lease="refs/heads/$BRANCH:$COMMIT_SHA" origin \
+            "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG:refs/tags/$TAG"; then
+            current=$(git -c http.extraheader="$auth" ls-remote --exit-code origin "refs/heads/$BRANCH" | cut -f1)
+            if [ "$current" != "$COMMIT_SHA" ]; then
+              echo "PyPI upload succeeded, but the branch advanced before its release tag could be pushed."
+              echo "Waiting for CI on the latest commit."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Could not push the release commit and tag." >&2
+            exit 1
+          fi
+        fi
+        echo "proceed=true" >> "$GITHUB_OUTPUT"
+    # Generate notes from the previous published release; for the first release,
+    # include all reachable history. Empty bot-generated version commits are omitted.
+    - name: Create GitHub release
+      if: ${{ success() && steps.release.outputs.proceed == 'true' }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        TAG: ${{ inputs.tag }}
+        COMMIT_SHA: ${{ inputs.commit-sha }}
+      shell: bash
+      run: |
+        released=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false) | .tag_name')
+        if grep -Fxq -- "$TAG" <<< "$released"; then
+          echo "Release $TAG already exists."
+          exit 0
+        fi
+        previous=
+        while IFS= read -r candidate; do
+          if [ "$candidate" != "$TAG" ] && grep -Fxq -- "$candidate" <<< "$released"; then
+            previous=$candidate
+            break
+          fi
+        done < <(git tag --merged "$COMMIT_SHA" --sort=-version:refname)
+
+        notes="$RUNNER_TEMP/release-notes.md"
+        if [ -n "$previous" ]; then
+          range="$previous..$COMMIT_SHA"
+        else
+          range="$COMMIT_SHA"
+        fi
+        commits=$(git rev-list --no-merges "$range")
+        while IFS= read -r sha; do
+          [ -n "$sha" ] || continue
+          subject=$(git show -s --format=%s "$sha")
+          email=$(git show -s --format=%ae "$sha")
+          if [[ "$subject" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$email" = '41898282+github-actions[bot]@users.noreply.github.com' ]; then
+            parent=$(git show -s --format=%P "$sha")
+            if [ -n "$parent" ]; then
+              tree=$(git rev-parse "$sha^{tree}")
+              parent_tree=$(git rev-parse "${parent%% *}^{tree}")
+              if [ "$tree" = "$parent_tree" ]; then
+                continue
+              fi
+            fi
+          fi
+          login=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.author.login // empty')
+          if [ -n "$login" ]; then
+            author="@$login"
+          else
+            author=$(git show -s --format=%an "$sha")
+          fi
+          printf -- '- %s by %s in [%s](https://github.com/%s/commit/%s)\n' "$subject" "$author" "${sha:0:7}" "$GITHUB_REPOSITORY" "$sha" >> "$notes"
+        done <<< "$commits"
+        if [ -n "$previous" ]; then
+          gh release create "$TAG" dist/* --verify-tag --generate-notes --notes-start-tag "$previous" --notes-file "$notes"
+        else
+          gh release create "$TAG" dist/* --verify-tag --generate-notes --notes-file "$notes"
+        fi
