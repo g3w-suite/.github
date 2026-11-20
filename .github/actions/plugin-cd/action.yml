@@ -33,7 +33,7 @@ runs:
       with:
         python-version: '3.11'
     # Reuse an existing tag on reruns, wait for the newest branch commit, and
-    # require an existing stable tag before automatic versioning starts.
+    # start repositories without a stable tag at v0.0.1.
     - name: Select next version
       id: version
       env:
@@ -54,9 +54,8 @@ runs:
           fi
           latest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]\.[0-9]$' | sort -V | tail -n 1 || true)
           if [ -z "$latest" ]; then
-            echo "::notice::No stable version tag found; seed one before enabling automatic releases."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            latest=v0.0.0
+            echo "::notice::No stable version tag found; using v0.0.0 as the initial baseline."
           fi
           bump() {
             local major minor patch

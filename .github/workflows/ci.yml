@@ -281,7 +281,13 @@ jobs:
               git(root, 'clone', '--branch', 'dev', str(untagged_remote), str(untagged_checkout))
               git(untagged_checkout, 'checkout', '--detach', untagged_source)
               checkout = untagged_checkout
-              assert run('Select next version', untagged_source) == {'proceed': 'false'}
+              initial = run('Select next version', untagged_source)
+              assert initial == {'existing': 'false', 'tag': 'v0.0.1', 'proceed': 'true'}
+              assert run('Create release commit and tag', untagged_source,
+                         TAG=initial['tag'], EXISTING='false') == {'proceed': 'true'}
+              initial_release = git(untagged_checkout, 'rev-parse', 'HEAD')
+              assert git(untagged_checkout, 'rev-parse', 'v0.0.1^{}') == initial_release
+              assert git(untagged_checkout, 'ls-remote', 'origin', 'refs/heads/dev').split()[0] == initial_release
           PY
   # Resolve metadata once so backend and browser jobs can start independently.
   discover-plugin:
