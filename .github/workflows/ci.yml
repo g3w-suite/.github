@@ -98,16 +98,16 @@ jobs:
           import textwrap
           from pathlib import Path
 
-          content = Path('shared/.github/workflows/cd.yml').read_text(encoding='utf-8')
-          publish = content.index('      - name: Publish to PyPI\n')
-          tag = content.index('      - name: Create release commit and tag\n')
-          release = content.index('      - name: Create GitHub release\n')
+          content = Path('shared/.github/actions/plugin-cd/action.yml').read_text(encoding='utf-8')
+          publish = content.index('    - name: Publish to PyPI\n')
+          tag = content.index('    - name: Create release commit and tag\n')
+          release = content.index('    - name: Create GitHub release\n')
           assert publish < tag < release
-          assert "if: steps.version.outputs.proceed == 'true'" in content[publish:tag]
-          assert "if: success() && steps.version.outputs.proceed == 'true'" in content[tag:release]
-          assert "if: success() && steps.release.outputs.proceed == 'true'" in content[release:]
-          script = textwrap.dedent(content.split('      - name: Create GitHub release\n', 1)[1]
-                                   .split('        run: |\n', 1)[1])
+          assert "if: ${{ steps.version.outputs.proceed == 'true' }}" in content[publish:tag]
+          assert "if: ${{ success() && steps.version.outputs.proceed == 'true' }}" in content[tag:release]
+          assert "if: ${{ success() && steps.release.outputs.proceed == 'true' }}" in content[release:]
+          script = textwrap.dedent(content.split('    - name: Create GitHub release\n', 1)[1]
+                                   .split('      run: |\n', 1)[1])
           with tempfile.TemporaryDirectory() as directory:
               root = Path(directory)
               repo = root / 'repo'
@@ -182,10 +182,10 @@ jobs:
           import textwrap
           from pathlib import Path
 
-          content = Path('shared/.github/workflows/cd.yml').read_text(encoding='utf-8')
+          content = Path('shared/.github/actions/plugin-cd/action.yml').read_text(encoding='utf-8')
           def script(name):
-              step = content.split(f'      - name: {name}\n', 1)[1].split('\n      - name:', 1)[0]
-              return textwrap.dedent(step.split('        run: |\n', 1)[1])
+              step = content.split(f'    - name: {name}\n', 1)[1].split('\n    - name:', 1)[0]
+              return textwrap.dedent(step.split('      run: |\n', 1)[1])
 
           with tempfile.TemporaryDirectory() as directory:
               root = Path(directory)
