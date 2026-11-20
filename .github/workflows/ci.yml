@@ -1,0 +1,413 @@
+# Reusable CI called by each plugin's .github/workflows/ci.yml on push and pull_request.
+# Run it by pushing a commit or opening/updating a PR in the plugin repository; it is
+# not a manual workflow. The integration job needs Ubuntu, Docker Compose, and the
+# G3W-ADMIN/QGIS stack, so it is not a standalone host-side test command.
+#
+# Independent discovery, package, and release-test jobs start in parallel.
+# Discovery then enables backend and browser tests to run concurrently.
+# - discover-plugin reads the module and @browser tags from pyproject.toml/features.
+# - package builds and checks the wheel with full Git history for setuptools_scm.
+# - release-tests exercise shared CD scripts in disposable repositories with fake gh.
+# - integration-tests run manage.py test inside G3W-ADMIN/QGIS; its test runner also
+#   executes the plugin's non-browser Behave features.
+# - browser-tests run discovered @browser features in a Playwright browser matrix.
+
+name: Plugin CI
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # Build and validate the wheel; setup-python caches pip downloads by project metadata.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install build twine
+      - run: python -m build && python -m twine check dist/*
+      - name: Check wheel contents
+        # Verify the built wheel includes the package configured by pyproject.toml.
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+
+          project_file = Path("pyproject.toml")
+          project = tomllib.loads(project_file.read_text(encoding="utf-8"))
+          packages = project.get("tool", {}).get("setuptools", {}).get("packages")
+          if isinstance(packages, list) and len(packages) == 1:
+              module = packages[0]
+          else:
+              includes = packages.get("find", {}).get("include", []) if isinstance(packages, dict) else []
+              if isinstance(includes, list) and len(includes) == 1:
+                  module = includes[0].rstrip("*")
+              else:
+                  name = project["project"]["name"]
+                  if name.startswith("g3w-admin-"):
+                      name = name.removeprefix("g3w-admin-")
+                  module = name.replace("-", "_")
+          if not module.isidentifier():
+              raise SystemExit(f"Invalid plugin module in {project_file}: {module!r}")
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one wheel, found {len(wheels)}")
+          with ZipFile(wheels[0]) as wheel:
+              files = set(wheel.namelist())
+          assert f"{module}/__init__.py" in files, f"{module} package is missing from {wheels[0]}"
+          test_paths = [
+              name for name in files
+              if PurePosixPath(name).parts[0] == module and "tests" in PurePosixPath(name).parts[1:]
+          ]
+          if test_paths:
+              raise SystemExit(f"Test files must not be included in the wheel: {test_paths[:10]}")
+          PY
+
+  release-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: g3w-suite/.github
+          ref: main
+          path: shared
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # Exercise the CD release-notes step in a temporary repository. The fake gh
+      # command avoids contacting GitHub; assertions cover previous-tag and first-
+      # release notes, including filtering the bot's empty version commit.
+      - name: Test release notes
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import textwrap
+          from pathlib import Path
+
+          content = Path('shared/.github/workflows/cd.yml').read_text(encoding='utf-8')
+          publish = content.index('      - name: Publish to PyPI\n')
+          tag = content.index('      - name: Create release commit and tag\n')
+          release = content.index('      - name: Create GitHub release\n')
+          assert publish < tag < release
+          assert "if: steps.version.outputs.proceed == 'true'" in content[publish:tag]
+          assert "if: success() && steps.version.outputs.proceed == 'true'" in content[tag:release]
+          assert "if: success() && steps.release.outputs.proceed == 'true'" in content[release:]
+          script = textwrap.dedent(content.split('      - name: Create GitHub release\n', 1)[1]
+                                   .split('        run: |\n', 1)[1])
+          with tempfile.TemporaryDirectory() as directory:
+              root = Path(directory)
+              repo = root / 'repo'
+              repo.mkdir()
+
+              def git(*args):
+                  return subprocess.run(['git', *args], cwd=repo, check=True, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, encoding='utf-8').stdout.strip()
+
+              git('init')
+              git('config', 'user.name', 'Local Author')
+              git('config', 'user.email', 'local@example.invalid')
+              git('commit', '--allow-empty', '-m', 'initial')
+              git('tag', 'v1.0.0')
+              git('commit', '--allow-empty', '-m', 'ci: fix tests')
+              direct = git('rev-parse', 'HEAD')
+              git('commit', '--allow-empty', '-m', '1.2.0')
+              manual = git('rev-parse', 'HEAD')
+              git('-c', 'user.name=github-actions[bot]',
+                  '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
+                  'commit', '--allow-empty', '-m', '1.2.1')
+              automatic = git('rev-parse', 'HEAD')
+
+              gh = root / 'gh'
+              gh.write_text(textwrap.dedent('''\
+                  #!/usr/bin/env bash
+                  if [ "$1" = api ] && [ "$2" = --paginate ]; then
+                    if [ -z "$NO_PREVIOUS" ]; then echo v1.0.0; fi
+                  elif [ "$1" = api ]; then
+                    if [[ "$2" = *"$DIRECT" ]]; then echo Alice; fi
+                  elif [ "$1" = release ] && [ "$2" = create ]; then
+                    printf '%s\\n' "$@" > "$RUNNER_TEMP/args"
+                  else
+                    exit 1
+                  fi
+              '''), encoding='utf-8')
+              gh.chmod(0o755)
+              bash = shutil.which('bash')
+              runner_temp = str(root)
+              if os.name == 'nt':
+                  bash = str(Path(shutil.which('git')).parent.parent / 'bin' / 'bash.exe')
+                  runner_temp = f'/{root.drive[0].lower()}{root.as_posix()[2:]}'
+              env = {
+                  **os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
+                  'GITHUB_REPOSITORY': 'owner/repo', 'RUNNER_TEMP': runner_temp,
+                  'COMMIT_SHA': automatic, 'TAG': 'v1.2.1', 'DIRECT': direct,
+              }
+              subprocess.run([bash, '-eo', 'pipefail', '-c', script], cwd=repo, env=env, check=True)
+              notes = (root / 'release-notes.md').read_text(encoding='utf-8')
+              assert f'- ci: fix tests by @Alice in [{direct[:7]}](https://github.com/owner/repo/commit/{direct})' in notes
+              assert f'- 1.2.0 by Local Author in [{manual[:7]}]' in notes
+              assert automatic[:7] not in notes
+              assert '--notes-start-tag\nv1.0.0' in (root / 'args').read_text()
+
+              env['NO_PREVIOUS'] = '1'
+              subprocess.run([bash, '-eo', 'pipefail', '-c', script], cwd=repo, env=env, check=True)
+              notes = (root / 'release-notes.md').read_text(encoding='utf-8')
+              assert '- initial by Local Author' in notes
+              assert automatic[:7] not in notes
+              assert '--notes-start-tag' not in (root / 'args').read_text()
+          PY
+      # Run the real version-selection and release-commit steps against temporary
+      # bare remotes. This covers retries and stale-branch races without pushing to
+      # the plugin repository.
+      - name: Test release commit
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import textwrap
+          from pathlib import Path
+
+          content = Path('shared/.github/workflows/cd.yml').read_text(encoding='utf-8')
+          def script(name):
+              step = content.split(f'      - name: {name}\n', 1)[1].split('\n      - name:', 1)[0]
+              return textwrap.dedent(step.split('        run: |\n', 1)[1])
+
+          with tempfile.TemporaryDirectory() as directory:
+              root = Path(directory)
+              remote, work, checkout = root / 'remote.git', root / 'work', root / 'checkout'
+              def git(cwd, *args):
+                  return subprocess.run(['git', *args], cwd=cwd, check=True, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, encoding='utf-8').stdout.strip()
+
+              git(root, 'init', '--bare', str(remote))
+              git(root, 'init', str(work))
+              git(work, 'switch', '-c', 'dev')
+              git(work, 'config', 'user.name', 'Test')
+              git(work, 'config', 'user.email', 'test@example.invalid')
+              git(work, 'commit', '--allow-empty', '-m', 'initial')
+              git(work, 'tag', '-a', 'v1.2.0', '-m', 'Previous release')
+              git(work, 'remote', 'add', 'origin', str(remote))
+              git(work, 'push', 'origin', 'dev', '--tags')
+              source = git(work, 'rev-parse', 'HEAD')
+              git(root, 'clone', '--branch', 'dev', str(remote), str(checkout))
+              git(checkout, 'checkout', '--detach', source)
+              output = root / 'output'
+              bash = shutil.which('bash')
+              output_path = str(output)
+              if os.name == 'nt':
+                  bash = str(Path(shutil.which('git')).parent.parent / 'bin' / 'bash.exe')
+                  output_path = f'/{output.drive[0].lower()}{output.as_posix()[2:]}'
+
+              def run(name, sha, **values):
+                  output.write_text('', encoding='utf-8')
+                  env = {**os.environ, 'COMMIT_SHA': sha, 'BRANCH': 'dev',
+                         'GH_TOKEN': 'test', 'GITHUB_OUTPUT': output_path, **values}
+                  subprocess.run([bash, '-eo', 'pipefail', '-c', script(name)],
+                                 cwd=checkout, env=env, check=True)
+                  return dict(line.split('=', 1) for line in output.read_text().splitlines())
+
+              version = run('Select next version', source)
+              assert version == {'existing': 'false', 'tag': 'v1.2.1', 'proceed': 'true'}
+              assert run('Create release commit and tag', source, TAG=version['tag'], EXISTING='false') == {'proceed': 'true'}
+              release = git(checkout, 'rev-parse', 'HEAD')
+              assert git(checkout, 'rev-parse', 'v1.2.1^{}') == release
+              assert git(checkout, 'ls-remote', 'origin', 'refs/heads/dev').split()[0] == release
+              assert git(checkout, 'ls-remote', 'origin', 'refs/tags/v1.2.1^{}').split()[0] == release
+              assert git(checkout, 'rev-parse', f'{release}^') == source
+              assert git(checkout, 'rev-parse', f'{release}^{{tree}}') == git(checkout, 'rev-parse', f'{source}^{{tree}}')
+              assert git(checkout, 'log', '-1', '--format=%s', release) == '1.2.1'
+              checkout = root / 'retry'
+              git(root, 'clone', '--branch', 'dev', str(remote), str(checkout))
+              git(checkout, 'checkout', '--detach', source)
+              retry = run('Select next version', source)
+              assert retry == {'existing': 'true', 'tag': 'v1.2.1', 'proceed': 'true'}
+              assert run('Create release commit and tag', source, TAG=retry['tag'], EXISTING='true') == {'proceed': 'true'}
+
+              git(work, 'pull', '--ff-only', 'origin', 'dev')
+              git(work, 'commit', '--allow-empty', '-m', 'next change')
+              git(work, 'push', 'origin', 'dev')
+              source = git(work, 'rev-parse', 'HEAD')
+              git(checkout, 'fetch', 'origin')
+              git(checkout, 'checkout', '--detach', source)
+              version = run('Select next version', source)
+              assert version == {'existing': 'false', 'tag': 'v1.2.2', 'proceed': 'true'}
+              git(work, 'commit', '--allow-empty', '-m', 'newer change')
+              git(work, 'push', 'origin', 'dev')
+              latest = git(work, 'rev-parse', 'HEAD')
+              assert run('Select next version', source) == {'proceed': 'false'}
+              assert run('Create release commit and tag', source, TAG=version['tag'], EXISTING='false') == {'proceed': 'false'}
+              assert git(checkout, 'ls-remote', 'origin', 'refs/heads/dev').split()[0] == latest
+              assert not git(checkout, 'ls-remote', 'origin', 'refs/tags/v1.2.2')
+
+              untagged_remote, untagged_work, untagged_checkout = (
+                  root / 'untagged.git', root / 'untagged-work', root / 'untagged-checkout')
+              git(root, 'init', '--bare', str(untagged_remote))
+              git(root, 'init', str(untagged_work))
+              git(untagged_work, 'switch', '-c', 'dev')
+              git(untagged_work, 'config', 'user.name', 'Test')
+              git(untagged_work, 'config', 'user.email', 'test@example.invalid')
+              git(untagged_work, 'commit', '--allow-empty', '-m', 'initial')
+              git(untagged_work, 'remote', 'add', 'origin', str(untagged_remote))
+              git(untagged_work, 'push', 'origin', 'dev')
+              untagged_source = git(untagged_work, 'rev-parse', 'HEAD')
+              git(root, 'clone', '--branch', 'dev', str(untagged_remote), str(untagged_checkout))
+              git(untagged_checkout, 'checkout', '--detach', untagged_source)
+              checkout = untagged_checkout
+              assert run('Select next version', untagged_source) == {'proceed': 'false'}
+          PY
+  # Resolve metadata once so backend and browser jobs can start independently.
+  discover-plugin:
+    runs-on: ubuntu-latest
+    outputs:
+      plugin_module: ${{ steps.discover.outputs.plugin_module }}
+      has_browser_tests: ${{ steps.discover.outputs.has_browser_tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Discover plugin module from pyproject.toml
+        id: discover
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project_file = Path("pyproject.toml")
+          project = tomllib.loads(project_file.read_text(encoding="utf-8"))
+          packages = project.get("tool", {}).get("setuptools", {}).get("packages")
+          if isinstance(packages, list) and len(packages) == 1:
+              module = packages[0]
+          else:
+              includes = packages.get("find", {}).get("include", []) if isinstance(packages, dict) else []
+              if isinstance(includes, list) and len(includes) == 1:
+                  module = includes[0].rstrip("*")
+              else:
+                  name = project["project"]["name"]
+                  if name.startswith("g3w-admin-"):
+                      name = name.removeprefix("g3w-admin-")
+                  module = name.replace("-", "_")
+          if not module.isidentifier():
+              raise SystemExit(f"Invalid plugin module in {project_file}: {module!r}")
+          if not Path(module).is_dir():
+              raise SystemExit(f"Plugin module {module!r} from {project_file} was not found")
+          features_dir = Path(module) / "tests" / "features"
+          features = list(features_dir.rglob("*.feature"))
+          if not features:
+              raise SystemExit(f"No BDD feature files found for plugin module {module!r}")
+          has_browser_tests = any(
+              "@browser" in line.partition("#")[0].split()
+              for feature in features
+              for line in feature.read_text(encoding="utf-8").splitlines()
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"plugin_module={module}\n")
+              output.write(f"has_browser_tests={str(has_browser_tests).lower()}\n")
+          PY
+
+  # Install and run the plugin inside the supported G3W-ADMIN/QGIS container.
+  integration-tests:
+    needs: discover-plugin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PLUGIN_MODULE: ${{ needs.discover-plugin.outputs.plugin_module }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: g3w-suite/g3w-admin
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - name: Install plugin source
+        run: |
+          mv "plugin/$PLUGIN_MODULE" "g3w-admin/$PLUGIN_MODULE"
+          for file in requirements.txt requirements_test.txt; do
+            if [ -f "plugin/$file" ]; then
+              cp "plugin/$file" "g3w-admin/$PLUGIN_MODULE/"
+            fi
+          done
+      - name: Start services
+        run: docker compose -f docker-compose.ltr.yml up -d
+      - name: Copy source into container
+        run: docker cp . "$(docker compose -f docker-compose.ltr.yml ps -q g3w-suite)":/code
+      - name: Install dependencies
+        run: |
+          docker compose -f docker-compose.ltr.yml exec -T -e PLUGIN_MODULE="$PLUGIN_MODULE" g3w-suite sh -c '
+            set -e
+            cd /code
+            pip3 install --break-system-packages -r requirements_docker.txt -r requirements_huey.txt
+            if [ -f "g3w-admin/$PLUGIN_MODULE/requirements.txt" ]; then
+              pip3 install --break-system-packages -r "g3w-admin/$PLUGIN_MODULE/requirements.txt"
+            fi
+            if [ -f "g3w-admin/$PLUGIN_MODULE/requirements_test.txt" ]; then
+              pip3 install --break-system-packages -r "g3w-admin/$PLUGIN_MODULE/requirements_test.txt"
+            fi
+          '
+      - name: Configure and set up G3W-ADMIN
+        run: |
+          docker compose -f docker-compose.ltr.yml exec -T -e PLUGIN_MODULE="$PLUGIN_MODULE" g3w-suite sh -c '
+            set -e
+            printf "\nG3WADMIN_LOCAL_MORE_APPS = [\"%s\"]\nfrom base.settings.base import THIRD_PARTY_APPS\nTHIRD_PARTY_APPS = THIRD_PARTY_APPS + [\"behave_django\"]\n" "$PLUGIN_MODULE" >> /code/settings_docker.py
+            /code/ci_scripts/build_suite.sh
+            /code/ci_scripts/setup_suite.sh
+            printf "\nfrom base.settings.tests_settings import *\n" >> /code/g3w-admin/base/settings/local_settings.py
+          '
+      - name: Run plugin tests
+        run: |
+          docker compose -f docker-compose.ltr.yml exec -T \
+            -e PLUGIN_MODULE="$PLUGIN_MODULE" \
+            g3w-suite sh -c '
+            cd /code/g3w-admin
+            python3 manage.py test "$PLUGIN_MODULE"
+          '
+
+  # Keep Playwright separate from backend tests. Any plugin opts in by adding
+  # @browser features under <module>/tests/features and declaring Behave/Playwright
+  #   dependencies in its root requirements_test.txt. It can run while integration
+  # tests execute because both jobs depend only on plugin discovery.
+  browser-tests:
+    needs: discover-plugin
+    if: needs.discover-plugin.outputs.has_browser_tests == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      PLUGIN_MODULE: ${{ needs.discover-plugin.outputs.plugin_module }}
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements_test.txt
+      - run: python -m pip install -r requirements_test.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ matrix.browser }}-${{ hashFiles('requirements_test.txt') }}
+      - run: python -m playwright install --with-deps ${{ matrix.browser }}
+      - run: python -m behave "${PLUGIN_MODULE}/tests/features" --tags=browser -D browser=${{ matrix.browser }} --junit --junit-directory "${PLUGIN_MODULE}/tests/results/${{ matrix.browser }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-bdd-${{ matrix.browser }}
+          path: ${{ env.PLUGIN_MODULE }}/tests/results
