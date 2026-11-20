@@ -177,8 +177,8 @@ jobs:
               publish = content.index('uses: pypa/gh-action-pypi-publish@release/v1')
               release = content.index('uses: g3w-suite/.github/.github/actions/plugin-cd-release@main')
               assert prepare < publish < release
-              assert "if: ${{ steps.prepare.outputs.proceed == 'true' }}" in content
-              assert "if: ${{ success() && steps.prepare.outputs.proceed == 'true' }}" in content
+              assert 'if: $' + "{{ steps.prepare.outputs.proceed == 'true' }}" in content
+              assert 'if: $' + "{{ success() && steps.prepare.outputs.proceed == 'true' }}" in content
           PY
       # Run the real version-selection and release-commit steps against temporary
       # bare remotes. This covers retries and stale-branch races without pushing to
