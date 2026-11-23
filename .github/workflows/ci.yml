@@ -8,14 +8,19 @@
 # - discover-plugin reads the module and @browser tags from pyproject.toml/features.
 # - package builds and checks the wheel with full Git history for setuptools_scm.
 # - release-tests exercise shared CD scripts in disposable repositories with fake gh.
-# - integration-tests run manage.py test inside G3W-ADMIN/QGIS; its test runner also
-#   executes the plugin's non-browser Behave features.
+# - integration-tests run Django tests and non-browser Behave features inside
+#   G3W-ADMIN/QGIS.
+#   Callers can set install-package to install their package before Django starts.
 # - browser-tests run discovered @browser features in a Playwright browser matrix.
 
 name: Plugin CI
 
 on:
   workflow_call:
+    inputs:
+      install-package:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -355,8 +360,14 @@ jobs:
         with:
           path: plugin
       - name: Install plugin source
+        env:
+          INSTALL_PACKAGE: ${{ inputs.install-package }}
         run: |
-          mv "plugin/$PLUGIN_MODULE" "g3w-admin/$PLUGIN_MODULE"
+          if [ "$INSTALL_PACKAGE" = true ]; then
+            cp -a "plugin/$PLUGIN_MODULE" "g3w-admin/$PLUGIN_MODULE"
+          else
+            mv "plugin/$PLUGIN_MODULE" "g3w-admin/$PLUGIN_MODULE"
+          fi
           for file in requirements.txt requirements_test.txt; do
             if [ -f "plugin/$file" ]; then
               cp "plugin/$file" "g3w-admin/$PLUGIN_MODULE/"
@@ -367,8 +378,10 @@ jobs:
       - name: Copy source into container
         run: docker cp . "$(docker compose -f docker-compose.ltr.yml ps -q g3w-suite)":/code
       - name: Install dependencies
+        env:
+          INSTALL_PACKAGE: ${{ inputs.install-package }}
         run: |
-          docker compose -f docker-compose.ltr.yml exec -T -e PLUGIN_MODULE="$PLUGIN_MODULE" g3w-suite sh -c '
+          docker compose -f docker-compose.ltr.yml exec -T -e PLUGIN_MODULE="$PLUGIN_MODULE" -e INSTALL_PACKAGE="$INSTALL_PACKAGE" g3w-suite sh -c '
             set -e
             cd /code
             pip3 install --break-system-packages -r requirements_docker.txt -r requirements_huey.txt
@@ -377,6 +390,9 @@ jobs:
             fi
             if [ -f "g3w-admin/$PLUGIN_MODULE/requirements_test.txt" ]; then
               pip3 install --break-system-packages -r "g3w-admin/$PLUGIN_MODULE/requirements_test.txt"
+            fi
+            if [ "$INSTALL_PACKAGE" = true ]; then
+              pip3 install --break-system-packages --no-deps -e /code/plugin
             fi
           '
       - name: Configure and set up G3W-ADMIN
@@ -393,8 +409,10 @@ jobs:
           docker compose -f docker-compose.ltr.yml exec -T \
             -e PLUGIN_MODULE="$PLUGIN_MODULE" \
             g3w-suite sh -c '
+            set -e
             cd /code/g3w-admin
             python3 manage.py test "$PLUGIN_MODULE"
+            python3 manage.py behave "$PLUGIN_MODULE/tests" --noinput --tags="not @browser"
           '
 
   # Keep Playwright separate from backend tests. Any plugin opts in by adding
