@@ -11,6 +11,8 @@
 # - integration-tests run Django tests and non-browser Behave features inside
 #   G3W-ADMIN/QGIS.
 #   Callers can set install-package to install their package before Django starts.
+#   Callers can set replace-bundled-app for plugins still included in G3W-ADMIN;
+#   browser tests then also check out its client assets.
 # - browser-tests run discovered @browser features in a Playwright browser matrix.
 
 name: Plugin CI
@@ -19,6 +21,9 @@ on:
   workflow_call:
     inputs:
       install-package:
+        type: boolean
+        default: false
+      replace-bundled-app:
         type: boolean
         default: false
 
@@ -185,6 +190,45 @@ jobs:
               assert 'if: $' + "{{ steps.prepare.outputs.proceed == 'true' }}" in content
               assert 'if: $' + "{{ success() && steps.prepare.outputs.proceed == 'true' }}" in content
           PY
+      - name: Test bundled app replacement
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          import textwrap
+          from pathlib import Path
+
+          content = Path('shared/.github/workflows/ci.yml').read_text(encoding='utf-8')
+          step = content.split('      - name: Install plugin source\n', 1)[1]
+          script = textwrap.dedent(step.split('        run: |\n', 1)[1].split('\n      - name:', 1)[0])
+          for replace, install in ((True, False), (True, True), (False, False)):
+              with tempfile.TemporaryDirectory() as directory:
+                  root = Path(directory)
+                  plugin = root / 'plugin' / 'example'
+                  plugin.mkdir(parents=True)
+                  (plugin / '__init__.py').write_text('plugin')
+                  bundled = root / 'g3w-admin' / 'example'
+                  bundled.parent.mkdir()
+                  if replace:
+                      bundled.mkdir()
+                      (bundled / '__init__.py').write_text('bundled')
+                  temp = root / 'temp'
+                  temp.mkdir()
+                  bash = shutil.which('bash')
+                  runner_temp = str(temp)
+                  if os.name == 'nt':
+                      bash = str(Path(shutil.which('git')).parent.parent / 'bin' / 'bash.exe')
+                      runner_temp = f'/{temp.drive[0].lower()}{temp.as_posix()[2:]}'
+                  env = {**os.environ, 'PLUGIN_MODULE': 'example', 'RUNNER_TEMP': runner_temp,
+                         'REPLACE_BUNDLED_APP': str(replace).lower(),
+                         'INSTALL_PACKAGE': str(install).lower()}
+                  subprocess.run([bash, '-eo', 'pipefail', '-c', script], cwd=root, env=env, check=True)
+                  assert (bundled / '__init__.py').read_text() == 'plugin'
+                  assert (temp / 'example').exists() == replace
+                  assert plugin.exists() == install
+          PY
       # Run the real version-selection and release-commit steps against temporary
       # bare remotes. This covers retries and stale-branch races without pushing to
       # the plugin repository.
@@ -294,11 +338,42 @@ jobs:
               assert git(untagged_checkout, 'rev-parse', 'v0.0.1^{}') == initial_release
               assert git(untagged_checkout, 'ls-remote', 'origin', 'refs/heads/dev').split()[0] == initial_release
           PY
+      - name: Test optional feature discovery
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import tempfile
+          import textwrap
+          from pathlib import Path
+
+          content = Path('shared/.github/workflows/ci.yml').read_text(encoding='utf-8')
+          step = content.split('      - name: Discover plugin module from pyproject.toml\n', 1)[1]
+          script = textwrap.dedent(step.split("          python - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
+          for feature, expected in ((None, ('false', 'false')),
+                                    ('Feature: backend\n', ('true', 'false')),
+                                    ('@browser\nFeature: browser\n', ('true', 'true'))):
+              with tempfile.TemporaryDirectory() as directory:
+                  root = Path(directory)
+                  (root / 'pyproject.toml').write_text('[project]\nname = "g3w-admin-example"\n')
+                  (root / 'example').mkdir()
+                  if feature is not None:
+                      features = root / 'example' / 'tests' / 'features'
+                      features.mkdir(parents=True)
+                      (features / 'example.feature').write_text(feature)
+                  output = root / 'output'
+                  subprocess.run(['python', '-c', script], cwd=root,
+                                 env={**os.environ, 'GITHUB_OUTPUT': str(output)}, check=True)
+                  values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                  assert (values['has_features'], values['has_browser_tests']) == expected
+          PY
+
   # Resolve metadata once so backend and browser jobs can start independently.
   discover-plugin:
     runs-on: ubuntu-latest
     outputs:
       plugin_module: ${{ steps.discover.outputs.plugin_module }}
+      has_features: ${{ steps.discover.outputs.has_features }}
       has_browser_tests: ${{ steps.discover.outputs.has_browser_tests }}
     steps:
       - uses: actions/checkout@v4
@@ -333,8 +408,6 @@ jobs:
               raise SystemExit(f"Plugin module {module!r} from {project_file} was not found")
           features_dir = Path(module) / "tests" / "features"
           features = list(features_dir.rglob("*.feature"))
-          if not features:
-              raise SystemExit(f"No BDD feature files found for plugin module {module!r}")
           has_browser_tests = any(
               "@browser" in line.partition("#")[0].split()
               for feature in features
@@ -342,6 +415,7 @@ jobs:
           )
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"plugin_module={module}\n")
+              output.write(f"has_features={str(bool(features)).lower()}\n")
               output.write(f"has_browser_tests={str(has_browser_tests).lower()}\n")
           PY
 
@@ -362,7 +436,11 @@ jobs:
       - name: Install plugin source
         env:
           INSTALL_PACKAGE: ${{ inputs.install-package }}
+          REPLACE_BUNDLED_APP: ${{ inputs.replace-bundled-app }}
         run: |
+          if [ "$REPLACE_BUNDLED_APP" = true ] && [ -d "g3w-admin/$PLUGIN_MODULE" ]; then
+            mv "g3w-admin/$PLUGIN_MODULE" "$RUNNER_TEMP/$PLUGIN_MODULE"
+          fi
           if [ "$INSTALL_PACKAGE" = true ]; then
             cp -a "plugin/$PLUGIN_MODULE" "g3w-admin/$PLUGIN_MODULE"
           else
@@ -405,14 +483,19 @@ jobs:
             printf "\nfrom base.settings.tests_settings import *\n" >> /code/g3w-admin/base/settings/local_settings.py
           '
       - name: Run plugin tests
+        env:
+          HAS_FEATURES: ${{ needs.discover-plugin.outputs.has_features }}
         run: |
           docker compose -f docker-compose.ltr.yml exec -T \
             -e PLUGIN_MODULE="$PLUGIN_MODULE" \
+            -e HAS_FEATURES="$HAS_FEATURES" \
             g3w-suite sh -c '
             set -e
             cd /code/g3w-admin
             python3 manage.py test "$PLUGIN_MODULE"
-            python3 manage.py behave "$PLUGIN_MODULE/tests" --noinput --tags="not @browser"
+            if [ "$HAS_FEATURES" = true ]; then
+              python3 manage.py behave "$PLUGIN_MODULE/tests" --noinput --tags="not @browser"
+            fi
           '
 
   # Keep Playwright separate from backend tests. Any plugin opts in by adding
@@ -431,6 +514,11 @@ jobs:
         browser: [chromium, firefox, webkit]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        if: inputs.replace-bundled-app
+        with:
+          repository: g3w-suite/g3w-admin
+          path: admin
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -443,6 +531,11 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ matrix.browser }}-${{ hashFiles('requirements_test.txt') }}
       - run: python -m playwright install --with-deps ${{ matrix.browser }}
       - run: python -m behave "${PLUGIN_MODULE}/tests/features" --tags=browser -D browser=${{ matrix.browser }} --junit --junit-directory "${PLUGIN_MODULE}/tests/results/${{ matrix.browser }}"
+        if: inputs.replace-bundled-app
+        env:
+          G3W_ADMIN_ROOT: ${{ github.workspace }}/admin/g3w-admin
+      - run: python -m behave "${PLUGIN_MODULE}/tests/features" --tags=browser -D browser=${{ matrix.browser }} --junit --junit-directory "${PLUGIN_MODULE}/tests/results/${{ matrix.browser }}"
+        if: ${{ !inputs.replace-bundled-app }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
